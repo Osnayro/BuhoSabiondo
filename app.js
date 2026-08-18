@@ -5,6 +5,8 @@
  * Registro por apodo y PIN
  * Selector de modalidad: 4 materias individuales o modo completo
  * Reproducción de intro al registrarse
+ * Estimación DEMRE con percentiles simulados (distribución normal inversa)
+ * Envío automático de puntaje al finalizar partida
  */
 
 const state = {
@@ -23,6 +25,8 @@ const state = {
     isFrozen: false,
     questions: [],
     correctInLevel: 0,
+    correctTotal: 0,
+    incorrectTotal: 0,
     powerups: {
         fifty: 3,
         time: 2,
@@ -84,6 +88,8 @@ const questionsPerLevel = {
 
 const LOTES_STORAGE_KEY = 'paes_lotes_v4';
 const LOTES_VERSION = '4.4.0';
+
+// ==================== FUNCIONES AUXILIARES ====================
 
 function generarLotes() {
     const todasLectora = [...(typeof paesLenguajeQuestions !== 'undefined' ? paesLenguajeQuestions : [])];
@@ -266,6 +272,8 @@ function playSound(type) {
     if (window.effectsManager) window.effectsManager.playSound(type);
 }
 
+// ==================== MODAL DE REGISTRO ====================
+
 const NicknameModal = {
     modalEl: null,
     formEl: null,
@@ -391,9 +399,7 @@ async function registrarOAutenticarUsuario(nombre, pin) {
         await fetch(SCRIPT_URL_REGISTRO, {
             method: "POST",
             mode: "no-cors",
-            headers: {
-                "Content-Type": "text/plain;charset=utf-8",
-            },
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
             body: JSON.stringify({
                 action: "login_or_register",
                 nombre: nombre,
@@ -416,9 +422,7 @@ async function guardarPuntaje(materia, puntaje, racha) {
         await fetch(SCRIPT_URL_REGISTRO, {
             method: "POST",
             mode: "no-cors",
-            headers: {
-                "Content-Type": "text/plain;charset=utf-8",
-            },
+            headers: { "Content-Type": "text/plain;charset=utf-8" },
             body: JSON.stringify({
                 action: "save_score",
                 nombre: nombre,
@@ -433,6 +437,8 @@ async function guardarPuntaje(materia, puntaje, racha) {
         console.error("Error al registrar el puntaje en BD_Lideres:", error);
     }
 }
+
+// ==================== ACORDEÓN Y RACHA DIARIA ====================
 
 function toggleAccordion(headerEl) {
     if (!headerEl) return;
@@ -480,6 +486,71 @@ function actualizarRachaDiaria() {
     }
 }
 
+// ==================== ESTIMACIÓN DEMRE CON PERCENTILES SIMULADOS ====================
+
+function inverseNormalCDF(p) {
+    const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+    const b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01];
+    const c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+    const d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00];
+
+    const plow = 0.02425;
+    const phigh = 1 - plow;
+
+    if (p < plow) {
+        const q = Math.sqrt(-2 * Math.log(p));
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+               ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+    } else if (p > phigh) {
+        const q = Math.sqrt(-2 * Math.log(1 - p));
+        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
+                ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+    } else {
+        const q = p - 0.5;
+        const r = q * q;
+        return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+               (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+    }
+}
+
+function calcularPuntajeDemreEstimado(correctas, total, promedioTiempo) {
+    if (!total || total === 0) {
+        return { min: 100, max: 150, nivel: 'Inicial', desc: 'Sigue practicando para medir tu rendimiento.' };
+    }
+
+    const pct = correctas / total;
+    const pctClamped = Math.min(0.999, Math.max(0.001, pct));
+    const z = inverseNormalCDF(pctClamped);
+    let puntaje = Math.round(500 + 100 * z);
+
+    if (promedioTiempo > 0 && promedioTiempo < 25 && pct > 0.6) {
+        puntaje += 15;
+    }
+
+    puntaje = Math.max(100, Math.min(1000, puntaje));
+
+    const min = Math.max(100, puntaje - 25);
+    const max = Math.min(1000, puntaje + 25);
+
+    let nivel = '🌱 Nivel Inicial (100-449 pts)';
+    let desc = 'Estás iniciando tu preparación. ¡Sigue reforzando los conceptos fundamentales de la prueba!';
+
+    if (puntaje >= 800) {
+        nivel = '🏆 Rango Superior (800-1000 pts)';
+        desc = '¡Rendimiento sobresaliente! Estás en un nivel óptimo para acceder a las carreras más exigentes.';
+    } else if (puntaje >= 650) {
+        nivel = '🌟 Rango Competitivo (650-799 pts)';
+        desc = '¡Excelente nivel! Tienes bases muy sólidas para conseguir una gran puntuación en la admisión.';
+    } else if (puntaje >= 450) {
+        nivel = '📚 Rango Intermedio (450-649 pts)';
+        desc = '¡Buen avance! Con práctica diaria constante elevarás tu puntaje final considerablemente.';
+    }
+
+    return { min, max, nivel, desc };
+}
+
+// ==================== INICIALIZACIÓN Y EVENTOS ====================
+
 document.addEventListener('DOMContentLoaded', () => {
     NicknameModal.init();
     loadBadges();
@@ -496,6 +567,8 @@ document.addEventListener('DOMContentLoaded', () => {
 window.addEventListener('online', () => {
     flushPendingGoogleSheets();
 });
+
+// ==================== INSTALACIÓN PWA ====================
 
 const INSTALL_DISMISSED_KEY_PREFIX = 'paes_install_dismissed_';
 let _deferredInstallPrompt = null;
@@ -572,6 +645,8 @@ function setupInstalacionPWA() {
         }, 1500);
     }, { once: true });
 }
+
+// ==================== SELECCIÓN DE LOTES Y MODALIDAD ====================
 
 function cargarYMostrarLotes() {
     state.lotesDisponibles = cargarLotes();
@@ -688,6 +763,8 @@ function reiniciarLotes() {
     if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡4 nuevas partidas! 🦉', { icon:'🔄', bg:'linear-gradient(135deg,#8B5CF6,#6D28D9)', duration:2500 });
 }
 
+// ==================== GESTIÓN DE LA INTERFAZ Y JUEGO ====================
+
 function createSpeedBonusToast() {
     if (document.getElementById('speed-bonus-toast')) return;
     const t = document.createElement('div'); t.className = 'speed-bonus-toast'; t.id = 'speed-bonus-toast';
@@ -764,6 +841,8 @@ function iniciarPartidaIndividual(nivel) {
     state.desafioEndTime = null;
     state.tiempoTotalDesafio = 0;
     state.totalPreguntasRespondidas = 0;
+    state.correctTotal = 0;
+    state.incorrectTotal = 0;
     state.score = 0;
     state.levelScore = 0;
     state.streak = 0;
@@ -833,6 +912,8 @@ function restaurarProgreso(progreso) {
     state.currentLevel = progreso.currentLevel;
     state.questions = progreso.questions;
     state.correctInLevel = progreso.correctInLevel;
+    state.correctTotal = progreso.correctTotal || 0;
+    state.incorrectTotal = progreso.incorrectTotal || 0;
     state.topicScores = progreso.topicScores || {};
     state.currentLote = progreso.loteId;
     state.loteData = progreso.loteData;
@@ -866,6 +947,8 @@ function iniciarJuegoNuevo() {
     state.desafioEndTime = null;
     state.tiempoTotalDesafio = 0;
     state.totalPreguntasRespondidas = 0;
+    state.correctTotal = 0;
+    state.incorrectTotal = 0;
     state.score = 0;
     state.levelScore = 0;
     state.streak = 0;
@@ -895,6 +978,8 @@ function guardarProgreso() {
         currentLevel: state.currentLevel,
         questions: state.questions,
         correctInLevel: state.correctInLevel,
+        correctTotal: state.correctTotal,
+        incorrectTotal: state.incorrectTotal,
         topicScores: state.topicScores,
         loteId: state.currentLote,
         loteData: state.loteData,
@@ -1026,6 +1111,8 @@ function updateBuhoReaction(r) {
     const list = msgs[r] || msgs['thinking'];
     if (sp) { sp.textContent = list[Math.floor(Math.random()*list.length)]; sp.className = 'character-speech state-'+r; sp.style.animation='none'; void sp.offsetHeight; sp.style.animation='speechBubbleIn 0.4s ease-out'; }
 }
+
+// ==================== PREGUNTAS Y RESPUESTAS ====================
 
 function mostrarLectura(question) {
     const lecturaContainer = document.getElementById('lectura-container');
@@ -1315,6 +1402,8 @@ document.addEventListener('keydown', function(e) {
     }
 });
 
+// ==================== CARGA DE PREGUNTAS ====================
+
 function loadQuestion() {
     if (state.currentQuestion >= state.totalQuestions) { endLevel(); return; }
     clearInterval(state.timerInterval); state.timerInterval = null;
@@ -1475,7 +1564,9 @@ function checkMultipleAnswer(oi, q) {
     opts.forEach((b,i) => { if (parseInt(b.dataset.originalIndex) === oi) cdi2 = i; });
     const rt = (Date.now() - state.questionStartTime) / 1000;
     clearInterval(state.timerInterval); state.timerInterval = null;
-    state.totalPreguntasRespondidas++;
+
+    // No incrementamos totalPreguntasRespondidas aquí; se hará en handleCorrectAnswer/handleIncorrectAnswer
+
     if (oi === q.correct) {
         if (opts[cdi2]) opts[cdi2].classList.add('correct');
         let tp = q.points; let sc = 15;
@@ -1500,6 +1591,8 @@ function checkMultipleAnswer(oi, q) {
 function handleCorrectAnswer(pts) {
     if (state._boredTimeout) clearTimeout(state._boredTimeout);
     state.score += pts; state.levelScore += pts; state.streak++; state.correctInLevel++;
+    state.correctTotal++;
+    state.totalPreguntasRespondidas++;
     if (state.streak > state.maxStreak) state.maxStreak = state.streak;
     const q = state.questions[state.currentQuestion];
     if (q?.topic) {
@@ -1518,7 +1611,9 @@ function handleCorrectAnswer(pts) {
 
 function handleIncorrectAnswer(q) {
     if (state._boredTimeout) clearTimeout(state._boredTimeout);
-    state.totalPreguntasRespondidas++; state.streak = 0; state.levelPerfect = false;
+    state.streak = 0; state.levelPerfect = false;
+    state.incorrectTotal++;
+    state.totalPreguntasRespondidas++;
     document.getElementById('streak-display')?.classList.remove('on-fire');
     if (q?.topic) {
         if (!state.topicScores[q.topic]) state.topicScores[q.topic] = {correct:0, total:0};
@@ -1542,6 +1637,8 @@ function nextQuestion() {
     document.getElementById('streak-display')?.classList.remove('on-fire');
     loadQuestion();
 }
+
+// ==================== FIN DE NIVEL Y RESULTADOS ====================
 
 function endLevel() {
     clearInterval(state.timerInterval); state.timerInterval = null;
@@ -1590,38 +1687,6 @@ function endLevel() {
     }
 }
 
-function calcularPuntajeDemreEstimado(correctas, total, promedioTiempo) {
-    if (!total || total === 0) return { min: 100, max: 150, nivel: 'Inicial', desc: 'Sigue practicando para medir tu rendimiento.' };
-    const pct = correctas / total;
-    
-    let baseMin = 100 + Math.round(pct * 850);
-    let baseMax = baseMin + 45;
-
-    if (promedioTiempo > 0 && promedioTiempo < 25 && pct > 0.6) {
-        baseMin += 15;
-        baseMax += 15;
-    }
-
-    baseMin = Math.min(950, Math.max(100, baseMin));
-    baseMax = Math.min(1000, Math.max(150, baseMax));
-
-    let nivel = '🌱 Nivel Inicial (100-449 pts)';
-    let desc = 'Estás iniciando tu preparación. ¡Sigue reforzando los conceptos fundamentales de la prueba!';
-
-    if (baseMin >= 800) {
-        nivel = '🏆 Rango Superior (800-1000 pts)';
-        desc = '¡Rendimiento sobresaliente! Estás en un nivel óptimo para acceder a las carreras más exigentes.';
-    } else if (baseMin >= 650) {
-        nivel = '🌟 Rango Competitivo (650-799 pts)';
-        desc = '¡Excelente nivel! Tienes bases muy sólidas para conseguir una gran puntuación en la admisión.';
-    } else if (baseMin >= 450) {
-        nivel = '📚 Rango Intermedio (450-649 pts)';
-        desc = '¡Buen avance! Con práctica diaria constante elevarás tu puntaje final considerablemente.';
-    }
-
-    return { min: baseMin, max: baseMax, nivel, desc };
-}
-
 function showFinalResults() {
     state.desafioEndTime = Date.now();
     state.tiempoTotalDesafio = (state.desafioEndTime - state.desafioStartTime) / 1000;
@@ -1638,18 +1703,21 @@ function showFinalResults() {
         td.innerHTML = `<div style="margin-top:12px;padding:14px;background:#F5F3FF;border-radius:12px;border-left:4px solid #8B5CF6;text-align:left"><strong>⏱️ Desempeño:</strong><br><span style="font-size:0.9rem">• Tiempo total: <b>${min}m ${seg}s</b><br>• Preguntas: <b>${state.totalPreguntasRespondidas}</b><br>• Promedio: <b>${prom.toFixed(1)}s</b><br>• ${ev}</span></div>`;
     }
 
-    // Estimación Puntaje DEMRE
-    const totalCorrectas = Object.values(state.topicScores).reduce((sum, t) => sum + (t.correct || 0), 0);
-    const totalPreguntas = state.totalPreguntasRespondidas || 1;
+    const totalCorrectas = state.correctTotal || 0;
+    const totalIncorrectas = state.incorrectTotal || 0;
+    const totalPreguntas = totalCorrectas + totalIncorrectas;
     const promTiempo = totalPreguntas > 0 ? (state.tiempoTotalDesafio / totalPreguntas) : 0;
     const estDemre = calcularPuntajeDemreEstimado(totalCorrectas, totalPreguntas, promTiempo);
-    
+
     const demreContainer = document.getElementById('paes-demre-estimation-container');
     if (demreContainer) {
+        const titulo = state.modoJuego !== 'completo' 
+            ? `Estimación DEMRE — ${levelNames[state.currentLevel]}`
+            : 'Estimación Puntaje PAES DEMRE';
         demreContainer.innerHTML = `
             <div class="paes-demre-card">
                 <div class="paes-demre-header">
-                    <span>🎓 Estimación Puntaje PAES DEMRE</span>
+                    <span>🎓 ${titulo}</span>
                 </div>
                 <div class="paes-demre-score">${estDemre.min} - ${estDemre.max} <small style="font-size:1rem;">pts</small></div>
                 <div class="paes-demre-level">${estDemre.nivel}</div>
@@ -1699,6 +1767,7 @@ function restartGame() {
     state.currentQuestion = 0; state.score = 0; state.levelScore = 0; state.streak = 0;
     state.currentLevel = 1; state.powerupsUsedThisLevel = false; state.levelPerfect = true;
     state.levelStars = {}; state.bonusQuestionActive = false; state.correctInLevel = 0;
+    state.correctTotal = 0; state.incorrectTotal = 0;
     state.currentLote = null; state.loteData = null; state.ultimoEstadoBocadillo = null;
     state.desafioStartTime = null; state.desafioEndTime = null; state.tiempoTotalDesafio = 0;
     state.totalPreguntasRespondidas = 0; state.lecturaActiva = null; state.modoJuego = null;
@@ -1715,6 +1784,8 @@ function restartGame() {
 }
 
 function goToFinalScreen() { updateBuhoReaction('graduate'); showScreen('screen-final'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); }
+
+// ==================== POWER-UPS ====================
 
 function usePowerup(type) {
     if (state.powerups[type] <= 0 || state.currentQuestion >= state.totalQuestions) return;
@@ -1750,6 +1821,8 @@ function applyHint() {
     fb.className = 'feedback-box correct';
 }
 
+// ==================== TEMPORIZADOR ====================
+
 function startTimer() {
     clearInterval(state.timerInterval); state.timerInterval = null;
     state.timer = levelTimerDefaults[state.currentLevel] || 60;
@@ -1766,6 +1839,8 @@ function startTimer() {
 
 function updateTimerDisplay() { const td = document.getElementById('timer-display'); if (td) td.textContent = `⏱️ ${state.timer}s`; }
 
+// ==================== ACTUALIZACIÓN DE UI ====================
+
 function updateScore() { const b = document.getElementById('score-display'); if (!b) return; b.textContent = `⭐ ${state.score} pts`; b.classList.add('pop'); setTimeout(() => b.classList.remove('pop'), 300); if (window.effectsManager?.triggerScoreBadgeFlash) window.effectsManager.triggerScoreBadgeFlash(); }
 function updateStreak() { const s = document.getElementById('streak-display'); if (s) s.textContent = `🔥 ${state.streak}`; }
 function updateProgress() { const p = document.getElementById('progress-fill'); if (p) p.style.width = `${(state.currentQuestion/state.totalQuestions)*100}%`; }
@@ -1776,6 +1851,8 @@ function updatePowerupButtons() {
         b.disabled = state.powerups[t] <= 0 || ((t === 'time' || t === 'freeze') && state.mode !== 'timed');
     });
 }
+
+// ==================== INSIGNIAS ====================
 
 function checkBadges() {
     if (state.score >= 3000 && !state.badges.paesPro) { state.badges.paesPro = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡PAES Pro!', {icon:'🏆',bg:'linear-gradient(135deg,#F59E0B,#D97706)',duration:3500}); },300); saveBadges(); }
@@ -1797,8 +1874,52 @@ function loadBadges() {
 }
 function saveBadges() { safeLocalSet('paes_badges_v4', JSON.stringify(state.badges)); }
 
+// ==================== LEADERBOARD Y ENVÍO AUTOMÁTICO ====================
+
+function guardarResultadoEnLeaderboard(nombre) {
+    try {
+        const lb = JSON.parse(safeLocalGet('paes_leaderboard_v4', '[]'));
+        lb.push({
+            name: nombre,
+            score: state.score,
+            badges: Object.values(state.badges).filter(Boolean).length,
+            tiempo: state.tiempoTotalDesafio,
+            promedio: state.totalPreguntasRespondidas > 0
+                ? (state.tiempoTotalDesafio / state.totalPreguntasRespondidas).toFixed(1)
+                : 0,
+            date: new Date().toLocaleDateString()
+        });
+        lb.sort((a, b) => b.score - a.score);
+        safeLocalSet('paes_leaderboard_v4', JSON.stringify(lb.slice(0, 20)));
+        loadLeaderboard();
+    } catch (e) {
+        console.warn('No se pudo guardar en leaderboard:', e);
+    }
+}
+
+function saveToLeaderboard() {
+    const nombreRegistrado = safeLocalGet('usuario_nombre', '') || safeLocalGet('paes_jugador_nombre', '');
+
+    if (nombreRegistrado) {
+        // Envío automático con el nombre registrado
+        guardarResultadoEnLeaderboard(nombreRegistrado);
+        enviarResultadosGoogleSheets(nombreRegistrado);
+        return;
+    }
+
+    // Solo pedir nombre si no hay registro previo (caso raro)
+    showNamePromptModal((name) => {
+        const nombreFinal = name || 'Anónimo';
+        if (name) {
+            safeLocalSet('paes_jugador_nombre', nombreFinal);
+            guardarResultadoEnLeaderboard(nombreFinal);
+        }
+        enviarResultadosGoogleSheets(nombreFinal);
+    });
+}
+
 function showNamePromptModal(cb) {
-    const nombreGuardado = safeLocalGet('paes_jugador_nombre', '');
+    const nombreGuardado = safeLocalGet('usuario_nombre', '') || safeLocalGet('paes_jugador_nombre', '');
     const ov = document.createElement('div');
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:3000;display:flex;align-items:center;justify-content:center;font-family:Poppins,sans-serif;padding:20px';
     const bx = document.createElement('div');
@@ -1808,25 +1929,14 @@ function showNamePromptModal(cb) {
     const inp = bx.querySelector('#paes-name-input'); inp.focus();
     if (nombreGuardado) inp.select();
     const close = (v) => { ov.remove(); cb(v); };
-    bx.querySelector('#paes-name-ok').addEventListener('click', () => close(inp.value.trim()||'Jugador'));
-    bx.querySelector('#paes-name-skip').addEventListener('click', () => close(null));
-    inp.addEventListener('keydown', (e) => { if (e.key==='Enter') close(inp.value.trim()||'Jugador'); });
-    document.addEventListener('keydown', function esc(e) { if (e.key==='Escape') { close(null); document.removeEventListener('keydown',esc); } });
-}
-
-function saveToLeaderboard() {
-    showNamePromptModal((name) => {
-        const nombreFinal = name || 'Anónimo';
-        safeLocalSet('paes_jugador_nombre', nombreFinal);
-        if (name) {
-            const lb = JSON.parse(safeLocalGet('paes_leaderboard_v4','[]'));
-            lb.push({ name, score:state.score, badges:Object.values(state.badges).filter(Boolean).length, tiempo:state.tiempoTotalDesafio, promedio:state.totalPreguntasRespondidas>0?(state.tiempoTotalDesafio/state.totalPreguntasRespondidas).toFixed(1):0, date:new Date().toLocaleDateString() });
-            lb.sort((a,b) => b.score - a.score);
-            safeLocalSet('paes_leaderboard_v4', JSON.stringify(lb.slice(0,20)));
-            loadLeaderboard();
-        }
-        enviarResultadosGoogleSheets(nombreFinal);
+    bx.querySelector('#paes-name-ok').addEventListener('click', () => {
+        const name = inp.value.trim() || 'Jugador';
+        safeLocalSet('paes_jugador_nombre', name);
+        close(name);
     });
+    bx.querySelector('#paes-name-skip').addEventListener('click', () => close(null));
+    inp.addEventListener('keydown', (e) => { if (e.key==='Enter') { const name = inp.value.trim() || 'Jugador'; safeLocalSet('paes_jugador_nombre', name); close(name); } });
+    document.addEventListener('keydown', function esc(e) { if (e.key==='Escape') { close(null); document.removeEventListener('keydown',esc); } });
 }
 
 function loadLeaderboard() {
@@ -1848,6 +1958,8 @@ function shareResults() {
     else navigator.clipboard.writeText(text).then(()=>{ if(window.effectsManager) window.effectsManager.triggerToastAcademico('¡Copiado!',{icon:'📋',duration:2500}); }).catch(()=>{ if(window.effectsManager) window.effectsManager.triggerToastAcademico('No se pudo copiar',{icon:'⚠️',duration:2500}); });
 }
 
+// ==================== ENVÍO A GOOGLE SHEETS ====================
+
 const GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbxvTEZlpd12ZLp0Z6krQw4iFsx6mcbBsTVucJxO4W-e-HR_VSKwUTusAi4U6VTgQx7X/exec';
 const SHEETS_PENDING_KEY = 'paes_sheets_pending_v1';
 
@@ -1857,13 +1969,15 @@ function construirPayloadResultados(nombreJugador) {
     const promedio = state.totalPreguntasRespondidas > 0
         ? (state.tiempoTotalDesafio / state.totalPreguntasRespondidas).toFixed(1)
         : 0;
+    const totalCorrectas = state.correctTotal || 0;
+    const totalIncorrectas = state.incorrectTotal || 0;
     return {
         jugador: nombreJugador || 'Anónimo',
         partida: state.currentLote || 1,
         puntaje: state.score,
         promedio: parseFloat(promedio),
-        correctas: Object.values(state.topicScores).reduce((sum, t) => sum + (t.correct || 0), 0),
-        total: state.totalPreguntasRespondidas,
+        correctas: totalCorrectas,
+        total: totalCorrectas + totalIncorrectas,
         insignias: Object.values(state.badges).filter(Boolean).length,
         tiempoTotal: `${minutos}m ${segundos}s`,
         fecha: new Date().toISOString()

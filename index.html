@@ -20,11 +20,26 @@
         .nickname-overlay.active {
             display: flex;
         }
+        /* Región accesible para lectores de pantalla */
+        .sr-only {
+            position: absolute;
+            left: -9999px;
+            top: auto;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+        }
     </style>
 </head>
 <body>
     <!-- Canvas para efectos visuales -->
     <canvas id="effects-canvas"></canvas>
+
+    <!-- Región viva para anuncios de accesibilidad -->
+    <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Contenedor de toasts con aria-live -->
+    <div id="toast-container" aria-live="assertive" aria-atomic="true"></div>
 
     <!-- ============================================================ -->
     <!-- SPLASH SCREEN -->
@@ -117,11 +132,11 @@
             <!-- Acordeón interactivo de información PAES -->
             <div class="info-accordion" id="paes-info-accordion">
                 <div class="accordion-item">
-                    <button type="button" class="accordion-header" onclick="toggleAccordion(this)">
+                    <button type="button" class="accordion-header" onclick="toggleAccordion(this)" aria-expanded="false">
                         <span>🎯 Niveles del desafío PAES</span>
                         <span class="accordion-icon">➕</span>
                     </button>
-                    <div class="accordion-content">
+                    <div class="accordion-content" role="region">
                         🟣 <b>Nivel 1:</b> Competencia Lectora (60s) — 25 preguntas<br>
                         🔵 <b>Nivel 2:</b> Matemática 1 - M1 (45s) — 25 preguntas<br>
                         🟢 <b>Nivel 3:</b> Matemática 2 - M2 (35s) — 25 preguntas<br>
@@ -130,11 +145,11 @@
                 </div>
 
                 <div class="accordion-item">
-                    <button type="button" class="accordion-header" onclick="toggleAccordion(this)">
+                    <button type="button" class="accordion-header" onclick="toggleAccordion(this)" aria-expanded="false">
                         <span>📚 Áreas evaluadas</span>
                         <span class="accordion-icon">➕</span>
                     </button>
-                    <div class="accordion-content">
+                    <div class="accordion-content" role="region">
                         • <b>Competencia Lectora:</b> Localizar, Interpretar, Evaluar<br>
                         • <b>Matemática 1:</b> Números, Álgebra, Geometría, Estadística<br>
                         • <b>Matemática 2:</b> Logaritmos, Trigonometría, Financiera<br>
@@ -148,12 +163,12 @@
 
             <!-- Modo de juego -->
             <div class="mode-grid">
-                <div class="mode-card selected" id="mode-normal" onclick="selectMode('normal')">
+                <div class="mode-card selected" id="mode-normal" onclick="selectMode('normal')" tabindex="0" role="button" aria-label="Modo Normal sin presión de tiempo">
                     <div class="mode-icon">🐢</div>
                     <div class="mode-title">Modo Normal</div>
                     <div class="mode-desc">Sin presión de tiempo</div>
                 </div>
-                <div class="mode-card" id="mode-timed" onclick="selectMode('timed')">
+                <div class="mode-card" id="mode-timed" onclick="selectMode('timed')" tabindex="0" role="button" aria-label="Modo Contrarreloj con tiempo por pregunta">
                     <div class="mode-icon">⚡</div>
                     <div class="mode-title">Contrarreloj</div>
                     <div class="mode-desc">35s - 60s por pregunta</div>
@@ -192,7 +207,7 @@
             <div class="matching-container" id="matching-container" style="display:none;"></div>
             <div class="drag-container" id="drag-container" style="display:none;"></div>
             <div class="slider-container" id="slider-container" style="display:none;"></div>
-            <div class="feedback-box" id="feedback-box"></div>
+            <div class="feedback-box" id="feedback-box" aria-live="polite"></div>
             <button class="main-btn" id="btn-next" style="display:none;" onclick="nextQuestion()">
                 Siguiente Pregunta ➡️
             </button>
@@ -329,7 +344,7 @@
             <span>Accede más rápido, incluso sin conexión</span>
         </div>
         <button class="install-banner-btn" id="install-android-btn" onclick="instalarPWAAndroid()">Instalar</button>
-        <button class="install-banner-close" onclick="cerrarBannerInstalacion('android')" aria-label="Cerrar">✕</button>
+        <button class="install-banner-close" onclick="cerrarBannerInstalacion('android')" aria-label="Cerrar banner de instalación">✕</button>
     </div>
 
     <div id="install-banner-ios" class="install-banner install-banner-ios" style="display:none;">
@@ -338,13 +353,13 @@
             <strong>Instala PAES Challenge en tu iPhone</strong>
             <span>Toca <b>Compartir</b> <span class="ios-share-icon">⬆️</span> y luego <b>"Agregar a inicio"</b></span>
         </div>
-        <button class="install-banner-close" onclick="cerrarBannerInstalacion('ios')" aria-label="Cerrar">✕</button>
+        <button class="install-banner-close" onclick="cerrarBannerInstalacion('ios')" aria-label="Cerrar banner de instalación">✕</button>
     </div>
 
     <!-- Modal de Registro / Autenticación de Usuario -->
-    <div id="nickname-modal" class="nickname-overlay">
+    <div id="nickname-modal" class="nickname-overlay" role="dialog" aria-modal="true" aria-labelledby="nickname-title">
         <div class="nickname-card">
-            <h2 class="nickname-title">¡Bienvenido! 🦉</h2>
+            <h2 class="nickname-title" id="nickname-title">¡Bienvenido! 🦉</h2>
             <p class="nickname-subtitle">Ingresa tu apodo y un PIN clave de 4 dígitos para registrar o consultar tu puntaje.</p>
             
             <form id="nickname-form">
@@ -356,7 +371,7 @@
                 <div class="nickname-input-group">
                     <label for="pin-field" class="nickname-label">PIN de Acceso (4 dígitos)</label>
                     <input type="password" id="pin-field" class="nickname-input" placeholder="Ej. 1234" maxlength="4" pattern="\d{4}" inputmode="numeric" required autocomplete="off">
-                    <span id="nickname-error-msg" class="nickname-error">Ingresa un apodo válido y un PIN de 4 números.</span>
+                    <span id="nickname-error-msg" class="nickname-error" aria-live="assertive">Ingresa un apodo válido y un PIN de 4 números.</span>
                 </div>
 
                 <button type="submit" id="btn-save-nickname" class="main-btn pulse-ready" style="width: 100%; margin-top: 10px;">Comenzar a Jugar 🚀</button>

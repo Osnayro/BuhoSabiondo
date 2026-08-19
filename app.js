@@ -1,4 +1,3 @@
-
 /**
  * PAES Challenge Engine v4.4.0 — Producción
  * Lógica del juego + 4 Lotes + Sabiondo + 4 Niveles
@@ -6,7 +5,11 @@
  * Selector de modalidad: 4 materias individuales o modo completo
  * Reproducción de intro al registrarse
  * Estimación DEMRE con percentiles simulados (distribución normal inversa)
- * Envío automático de puntaje al finalizar partida
+ * Envío automático de puntaje a BD_Lideres (Google Sheets)
+ * Carga remota de la tabla de líderes con caché local
+ * Soporte táctil para drag & drop
+ * Mejoras de accesibilidad y rendimiento
+ * Transiciones de pantalla v4.5 y Evolución de Sabiondo
  */
 
 const state = {
@@ -57,6 +60,8 @@ const state = {
     lecturaActiva: null,
     modoJuego: null
 };
+
+let touchDraggedIndex = null;
 
 const levelNames = {
     1: '📖 Competencia Lectora',
@@ -272,6 +277,28 @@ function playSound(type) {
     if (window.effectsManager) window.effectsManager.playSound(type);
 }
 
+function mostrarToast(mensaje, icono = '🔔', bg = 'linear-gradient(135deg, #1E3A63, #3B82F6)', duration = 3000) {
+    if (window.effectsManager && typeof window.effectsManager.triggerToastAcademico === 'function') {
+        window.effectsManager.triggerToastAcademico(mensaje, { icon: icono, bg, duration });
+    } else {
+        console.log(`[Toast] ${icono} ${mensaje}`);
+    }
+}
+
+function anunciarParaAccesibilidad(mensaje) {
+    let liveRegion = document.getElementById('live-region');
+    if (!liveRegion) {
+        liveRegion = document.createElement('div');
+        liveRegion.id = 'live-region';
+        liveRegion.setAttribute('aria-live', 'polite');
+        liveRegion.setAttribute('aria-atomic', 'true');
+        liveRegion.style.cssText = 'position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;';
+        document.body.appendChild(liveRegion);
+    }
+    liveRegion.textContent = '';
+    setTimeout(() => { liveRegion.textContent = mensaje; }, 50);
+}
+
 // ==================== MODAL DE REGISTRO ====================
 
 const NicknameModal = {
@@ -320,12 +347,14 @@ const NicknameModal = {
         if (!this.errorMsgEl) return;
         if (mensaje) this.errorMsgEl.textContent = mensaje;
         this.errorMsgEl.classList.add('active');
+        this.errorMsgEl.setAttribute('role', 'alert');
         [this.nicknameFieldEl, this.pinFieldEl].forEach(el => el && el.classList.add('input-error'));
     },
 
     clearError() {
         if (!this.errorMsgEl) return;
         this.errorMsgEl.classList.remove('active');
+        this.errorMsgEl.removeAttribute('role');
         [this.nicknameFieldEl, this.pinFieldEl].forEach(el => el && el.classList.remove('input-error'));
     },
 
@@ -372,9 +401,8 @@ const NicknameModal = {
             window.effectsManager.playSound('intro');
         }
 
-        if (window.effectsManager) {
-            window.effectsManager.triggerToastAcademico(`¡Bienvenido, ${nombre}! 🎉`, { icon: '🎉', duration: 2500 });
-        }
+        mostrarToast(`¡Bienvenido, ${nombre}! 🎉`, '🎉');
+        anunciarParaAccesibilidad(`Bienvenido ${nombre}, ya puedes elegir partida y modalidad.`);
     },
 
     solicitarReset() {
@@ -385,14 +413,14 @@ const NicknameModal = {
             if (this.pinFieldEl) this.pinFieldEl.value = '';
             this.clearError();
             this.show();
-            if (window.effectsManager) {
-                window.effectsManager.triggerToastAcademico('Perfil reiniciado 🔄', { icon: '🔄', duration: 2000 });
-            }
+            mostrarToast('Perfil reiniciado 🔄', '🔄');
         }
     }
 };
 
 const SCRIPT_URL_REGISTRO = "https://script.google.com/macros/s/AKfycbwZkLrIZ-bo4nJfJQ3r5lTa8orrmYWNVr6joi0Ng-c8SwDyU_bqzc4zxffcB1Phn7-ncA/exec";
+const GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbxvTEZlpd12ZLp0Z6krQw4iFsx6mcbBsTVucJxO4W-e-HR_VSKwUTusAi4U6VTgQx7X/exec';
+const SHEETS_PENDING_KEY = 'paes_sheets_pending_v1';
 
 async function registrarOAutenticarUsuario(nombre, pin) {
     try {
@@ -414,30 +442,6 @@ async function registrarOAutenticarUsuario(nombre, pin) {
     }
 }
 
-async function guardarPuntaje(materia, puntaje, racha) {
-    const nombre = safeLocalGet('usuario_nombre', '');
-    if (!nombre) return;
-
-    try {
-        await fetch(SCRIPT_URL_REGISTRO, {
-            method: "POST",
-            mode: "no-cors",
-            headers: { "Content-Type": "text/plain;charset=utf-8" },
-            body: JSON.stringify({
-                action: "save_score",
-                nombre: nombre,
-                materia: materia || "General",
-                puntaje_maximo: puntaje || 0,
-                racha_maxima: racha || 0,
-                fecha: new Date().toISOString().split('T')[0]
-            })
-        });
-        console.log("Puntaje guardado con éxito en BD_Lideres.");
-    } catch (error) {
-        console.error("Error al registrar el puntaje en BD_Lideres:", error);
-    }
-}
-
 // ==================== ACORDEÓN Y RACHA DIARIA ====================
 
 function toggleAccordion(headerEl) {
@@ -448,6 +452,7 @@ function toggleAccordion(headerEl) {
     document.querySelectorAll('.accordion-item').forEach(el => el.classList.remove('active'));
     if (!isActive) {
         item.classList.add('active');
+        anunciarParaAccesibilidad('Información ampliada');
     }
 }
 
@@ -486,7 +491,7 @@ function actualizarRachaDiaria() {
     }
 }
 
-// ==================== ESTIMACIÓN DEMRE CON PERCENTILES SIMULADOS ====================
+// ==================== ESTIMACIÓN DEMRE ====================
 
 function inverseNormalCDF(p) {
     const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
@@ -560,13 +565,33 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof injectBuhoSVGs === 'function') injectBuhoSVGs();
     flushPendingGoogleSheets();
     limpiarResaltadosAntiguos();
+    limpiarDatosAntiguos();
     setupInstalacionPWA();
     actualizarRachaDiaria();
 });
 
 window.addEventListener('online', () => {
     flushPendingGoogleSheets();
+    loadLeaderboard();
 });
+
+// ==================== LIMPIEZA DE DATOS ANTIGUOS ====================
+
+function limpiarDatosAntiguos() {
+    const treintaDias = 30 * 24 * 60 * 60 * 1000;
+    const ahora = Date.now();
+
+    const leaderboard = JSON.parse(safeLocalGet('paes_leaderboard_v4', '[]'));
+    const filtrado = leaderboard.filter(entry => {
+        const fecha = new Date(entry.date + 'T00:00:00');
+        return !entry.date || (ahora - fecha.getTime() < treintaDias);
+    });
+    safeLocalSet('paes_leaderboard_v4', JSON.stringify(filtrado));
+
+    const queue = JSON.parse(safeLocalGet(SHEETS_PENDING_KEY, '[]'));
+    const nuevaQueue = queue.filter(item => !item.timestamp || (ahora - item.timestamp < treintaDias));
+    safeLocalSet(SHEETS_PENDING_KEY, JSON.stringify(nuevaQueue));
+}
 
 // ==================== INSTALACIÓN PWA ====================
 
@@ -683,7 +708,13 @@ function actualizarSelectorLotes(lotes) {
             <div class="mode-desc">${lote.totalPreguntas} preguntas</div>
             <div class="mode-desc" style="font-size:0.65rem;color:#64748B">📖${lote.preguntas.lectora.length} 📐${lote.preguntas.matematica1.length} 📊${lote.preguntas.matematica2.length} 🔬${lote.preguntas.ciencias.length}</div>
             ${lote.usado ? '<div style="font-size:0.7rem;color:#EF4444">✅ Completada</div>' : ''}`;
-        if (!lote.usado) card.addEventListener('click', () => seleccionarLote(lote));
+        if (!lote.usado) {
+            card.addEventListener('click', () => seleccionarLote(lote));
+            card.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                seleccionarLote(lote);
+            });
+        }
         grid.appendChild(card);
     });
     container.appendChild(grid);
@@ -732,6 +763,13 @@ function mostrarSelectorModalidad() {
             state.modoJuego = m.id;
             actualizarTextoBotonStart();
         });
+        btn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            opciones.querySelectorAll('.mode-card').forEach(b => b.classList.remove('selected'));
+            btn.classList.add('selected');
+            state.modoJuego = m.id;
+            actualizarTextoBotonStart();
+        });
         opciones.appendChild(btn);
     });
 }
@@ -760,7 +798,7 @@ function reiniciarLotes() {
     const ms = document.getElementById('materia-selector');
     if (ms) ms.style.display = 'none';
     state.modoJuego = null;
-    if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡4 nuevas partidas! 🦉', { icon:'🔄', bg:'linear-gradient(135deg,#8B5CF6,#6D28D9)', duration:2500 });
+    mostrarToast('¡4 nuevas partidas! 🦉', '🔄');
 }
 
 // ==================== GESTIÓN DE LA INTERFAZ Y JUEGO ====================
@@ -782,26 +820,71 @@ function triggerVisualStarsFromElement(el, c) { if (window.effectsManager) windo
 
 function setupPowerups() {
     ['fifty','time','freeze','hint'].forEach(t => {
-        document.getElementById(`powerup-${t}`)?.addEventListener('click', () => usePowerup(t));
+        const btn = document.getElementById(`powerup-${t}`);
+        if (btn) {
+            btn.addEventListener('click', () => usePowerup(t));
+            btn.addEventListener('touchend', (e) => { e.preventDefault(); usePowerup(t); });
+        }
     });
 }
 
+const screenTransitions = {
+    'screen-welcome': 'screen-enter-fade',
+    'screen-question': 'screen-enter-slide',
+    'screen-level-transition': 'screen-enter-pop',
+    'screen-results': 'screen-enter-slide',
+    'screen-final': 'screen-enter-zoom',
+    'screen-badges': 'screen-enter-fade',
+    'screen-leaderboard': 'screen-enter-fade'
+};
+
 function showScreen(id) {
-    document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
-    const screen = document.getElementById(id);
-    if (screen) { screen.classList.add('active'); screen.classList.add('screen-expand'); setTimeout(() => screen.classList.remove('screen-expand'), 500); }
-    if (id === 'screen-badges') loadBadges();
-    if (id === 'screen-leaderboard') loadLeaderboard();
-    if (id === 'screen-welcome') {
-        cargarYMostrarLotes();
-        document.getElementById('btn-start').style.display = 'none';
-        document.getElementById('lote-confirmacion').style.display = 'none';
-        document.getElementById('lote-selector').style.display = 'block';
-        const ms = document.getElementById('materia-selector');
-        if (ms) ms.style.display = 'none';
-        state.modoJuego = null;
+    const current = document.querySelector('.screen.active');
+    const next = document.getElementById(id);
+    if (!next) return;
+
+    const finishSwitch = () => {
+        document.querySelectorAll('.screen').forEach(s => {
+            s.classList.remove('active', 'screen-expand', 'screen-exit',
+                'screen-enter-fade', 'screen-enter-slide', 'screen-enter-pop', 'screen-enter-zoom');
+        });
+
+        const enterClass = screenTransitions[id] || 'screen-enter-fade';
+        next.classList.add('active', enterClass);
+        setTimeout(() => next.classList.remove(enterClass), 650);
+
+        if (id === 'screen-badges') loadBadges();
+        if (id === 'screen-leaderboard') loadLeaderboard();
+        if (id === 'screen-welcome') {
+            cargarYMostrarLotes();
+            document.getElementById('btn-start').style.display = 'none';
+            document.getElementById('lote-confirmacion').style.display = 'none';
+            document.getElementById('lote-selector').style.display = 'block';
+            const ms = document.getElementById('materia-selector');
+            if (ms) ms.style.display = 'none';
+            state.modoJuego = null;
+        }
+        if (typeof injectBuhoSVGs === 'function') setTimeout(injectBuhoSVGs, 100);
+        if (typeof updateSabiondoEvolution === 'function') setTimeout(updateSabiondoEvolution, 120);
+
+        const screenNames = {
+            'screen-welcome': 'Pantalla de bienvenida',
+            'screen-question': 'Pregunta',
+            'screen-level-transition': 'Transición de nivel',
+            'screen-results': 'Resultados',
+            'screen-final': 'Mensaje final',
+            'screen-badges': 'Insignias',
+            'screen-leaderboard': 'Clasificación'
+        };
+        if (screenNames[id]) anunciarParaAccesibilidad(screenNames[id]);
+    };
+
+    if (current && current !== next) {
+        current.classList.add('screen-exit');
+        setTimeout(finishSwitch, 180);
+    } else {
+        finishSwitch();
     }
-    if (typeof injectBuhoSVGs === 'function') setTimeout(injectBuhoSVGs, 100);
 }
 
 function selectMode(m) {
@@ -814,12 +897,12 @@ function selectMode(m) {
 
 function startGame() {
     if (!state.currentLote || !state.loteData) {
-        if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Elige una partida! 🦉', { icon:'⚠️', bg:'linear-gradient(135deg,#F59E0B,#D97706)', duration:2500 });
+        mostrarToast('¡Elige una partida! 🦉', '⚠️', 'linear-gradient(135deg,#F59E0B,#D97706)');
         return;
     }
 
     if (!state.modoJuego) {
-        if (window.effectsManager) window.effectsManager.triggerToastAcademico('🎯 Elige una modalidad de juego', { icon:'⚠️', duration:2500 });
+        mostrarToast('🎯 Elige una modalidad de juego', '⚠️');
         return;
     }
 
@@ -936,9 +1019,7 @@ function restaurarProgreso(progreso) {
 
     borrarProgreso();
 
-    if (window.effectsManager) {
-        window.effectsManager.triggerToastAcademico('¡Partida restaurada! 🎯', { icon:'▶', bg:'linear-gradient(135deg,#10B981,#059669)', duration:2500 });
-    }
+    mostrarToast('¡Partida restaurada! 🎯', '▶', 'linear-gradient(135deg,#10B981,#059669)');
 }
 
 function iniciarJuegoNuevo() {
@@ -1175,7 +1256,7 @@ function mostrarLectura(question) {
 function resaltarSeleccion(textKey) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-        if (window.effectsManager) window.effectsManager.triggerToastAcademico('Selecciona un texto primero', { icon: '📝', duration: 2000 });
+        mostrarToast('Selecciona un texto primero', '📝');
         return;
     }
 
@@ -1201,7 +1282,7 @@ function resaltarSeleccion(textKey) {
 
     selection.removeAllRanges();
     guardarResaltados(textKey);
-    if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Texto resaltado!', { icon: '🖍️', duration: 1500 });
+    mostrarToast('¡Texto resaltado!', '🖍️');
 }
 
 function guardarResaltados(textKey) {
@@ -1248,7 +1329,7 @@ function limpiarResaltados(textKey) {
     });
     bodyEl.normalize();
     safeLocalSet(`paes_resaltados_${textKey}`, '[]');
-    if (window.effectsManager) window.effectsManager.triggerToastAcademico('Resaltados eliminados', { icon: '🗑️', duration: 1500 });
+    mostrarToast('Resaltados eliminados', '🗑️');
 }
 
 function limpiarTodosResaltados() {
@@ -1357,7 +1438,7 @@ function cerrarLecturaFullscreen() {
 function resaltarDesdeFullscreen(textKey) {
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-        if (window.effectsManager) window.effectsManager.triggerToastAcademico('Selecciona un texto primero', { icon: '📝', duration: 2000 });
+        mostrarToast('Selecciona un texto primero', '📝');
         return;
     }
     const range = selection.getRangeAt(0);
@@ -1373,7 +1454,7 @@ function resaltarDesdeFullscreen(textKey) {
         newSpan.appendChild(fragment); range.insertNode(newSpan);
     }
     selection.removeAllRanges();
-    if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Texto resaltado!', { icon: '🖍️', duration: 1500 });
+    mostrarToast('¡Texto resaltado!', '🖍️');
 }
 
 function limpiarResaltadosFullscreen(textKey) {
@@ -1384,7 +1465,7 @@ function limpiarResaltadosFullscreen(textKey) {
         parent.replaceChild(document.createTextNode(span.textContent), span);
     });
     bodyEl.normalize();
-    if (window.effectsManager) window.effectsManager.triggerToastAcademico('Resaltados eliminados', { icon: '🗑️', duration: 1500 });
+    mostrarToast('Resaltados eliminados', '🗑️');
 }
 
 function sincronizarResaltadosFullscreen() {
@@ -1446,6 +1527,10 @@ function loadMultipleChoice(q) {
         btn.setAttribute('aria-label', `Opción ${letters[disp]}: ${q.options[orig]}`);
         btn.setAttribute('role','radio');
         btn.addEventListener('click', () => checkMultipleAnswer(orig, q));
+        btn.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            checkMultipleAnswer(orig, q);
+        });
         grid.appendChild(btn);
     });
 }
@@ -1464,12 +1549,41 @@ function loadMatching(q) {
             mc.querySelectorAll('.matching-item[data-side="left"]').forEach(el => { if (!el.classList.contains('matched')) el.classList.remove('selected'); });
             this.classList.add('selected'); sel = this;
         });
+        d.addEventListener('touchend', function(e){
+            e.preventDefault();
+            if (this.classList.contains('matched')) return;
+            if (window.effectsManager) window.effectsManager.ensureAudio();
+            mc.querySelectorAll('.matching-item[data-side="left"]').forEach(el => { if (!el.classList.contains('matched')) el.classList.remove('selected'); });
+            this.classList.add('selected'); sel = this;
+        });
         mc.appendChild(d);
     });
     right.forEach(item => {
         const d = document.createElement('div'); d.className = 'matching-item'; d.textContent = item.text;
         d.dataset.pairId = item.id; d.dataset.side = 'right';
         d.addEventListener('click', function(){
+            if (this.classList.contains('matched')) return;
+            if (window.effectsManager) window.effectsManager.ensureAudio();
+            if (sel && !this.classList.contains('matched')) {
+                if (sel.dataset.pairId === this.dataset.pairId) {
+                    sel.classList.add('matched'); this.classList.add('matched');
+                    matches[this.dataset.pairId] = true; sel = null;
+                    if (Object.keys(matches).length === q.pairs.length) {
+                        clearInterval(state.timerInterval); state.timerInterval = null;
+                        showFeedback(`¡Perfecto! ${q.explanation||''}`, 'correct');
+                        triggerVisualStarsFromElement(mc, 16);
+                        handleCorrectAnswer(q.points);
+                    }
+                } else {
+                    const le = sel;
+                    le.style.borderColor = 'var(--rojo-alerta)'; this.style.borderColor = 'var(--rojo-alerta)';
+                    setTimeout(() => { le.style.borderColor = '#CBD5E1'; this.style.borderColor = '#CBD5E1'; le.classList.remove('selected'); }, 500);
+                    sel = null;
+                }
+            }
+        });
+        d.addEventListener('touchend', function(e){
+            e.preventDefault();
             if (this.classList.contains('matched')) return;
             if (window.effectsManager) window.effectsManager.ensureAudio();
             if (sel && !this.classList.contains('matched')) {
@@ -1512,6 +1626,14 @@ function loadSlider(q) {
         if (Math.abs(ua - q.correctAnswer) <= q.tolerance) { showFeedback(`¡Correcto! ${q.explanation}`, 'correct'); triggerVisualStarsFromElement(sb,14); handleCorrectAnswer(q.points); }
         else { showFeedback(`Incorrecto. ${q.explanation}`, 'incorrect'); handleIncorrectAnswer(q); }
     });
+    sb.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        if (window.effectsManager) window.effectsManager.ensureAudio();
+        clearInterval(state.timerInterval); state.timerInterval = null;
+        const ua = parseFloat(inp.value);
+        if (Math.abs(ua - q.correctAnswer) <= q.tolerance) { showFeedback(`¡Correcto! ${q.explanation}`, 'correct'); triggerVisualStarsFromElement(sb,14); handleCorrectAnswer(q.points); }
+        else { showFeedback(`Incorrecto. ${q.explanation}`, 'incorrect'); handleIncorrectAnswer(q); }
+    });
     sc.appendChild(vd); sc.appendChild(tr); sc.appendChild(sb);
 }
 
@@ -1530,6 +1652,16 @@ function loadDrag(q) {
             dz.dataset.filled = e.dataTransfer.getData('text/plain');
             checkDragComplete(q);
         });
+        dz.addEventListener('touchend', (e) => {
+            e.preventDefault();
+            if (touchDraggedIndex === null) return;
+            if (window.effectsManager) window.effectsManager.ensureAudio();
+            dz.textContent = `${idx+1}. ${q.items[touchDraggedIndex]}`;
+            dz.dataset.filled = touchDraggedIndex;
+            touchDraggedIndex = null;
+            document.querySelectorAll('.draggable-item').forEach(el => el.classList.remove('touch-selected'));
+            checkDragComplete(q);
+        });
         dc.appendChild(dz);
     });
     const ic = document.createElement('div'); ic.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;margin-top:10px';
@@ -1538,6 +1670,12 @@ function loadDrag(q) {
         dg.draggable = true; dg.dataset.originalIndex = q.items.indexOf(item);
         dg.addEventListener('dragstart', e => { e.dataTransfer.setData('text/plain', dg.dataset.originalIndex); dg.style.opacity = '0.5'; });
         dg.addEventListener('dragend', () => { dg.style.opacity = '1'; });
+        dg.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            touchDraggedIndex = parseInt(dg.dataset.originalIndex, 10);
+            document.querySelectorAll('.draggable-item').forEach(el => el.classList.remove('touch-selected'));
+            dg.classList.add('touch-selected');
+        });
         ic.appendChild(dg);
     });
     dc.appendChild(ic);
@@ -1564,8 +1702,6 @@ function checkMultipleAnswer(oi, q) {
     opts.forEach((b,i) => { if (parseInt(b.dataset.originalIndex) === oi) cdi2 = i; });
     const rt = (Date.now() - state.questionStartTime) / 1000;
     clearInterval(state.timerInterval); state.timerInterval = null;
-
-    // No incrementamos totalPreguntasRespondidas aquí; se hará en handleCorrectAnswer/handleIncorrectAnswer
 
     if (oi === q.correct) {
         if (opts[cdi2]) opts[cdi2].classList.add('correct');
@@ -1627,6 +1763,7 @@ function handleIncorrectAnswer(q) {
 function showFeedback(msg, type) {
     const fb = document.getElementById('feedback-box'); if (!fb) return;
     fb.textContent = msg; fb.className = `feedback-box ${type}`;
+    fb.setAttribute('aria-live', 'polite');
 }
 
 function nextQuestion() {
@@ -1657,13 +1794,13 @@ function endLevel() {
     if (state.levelPerfect && !state.badges.perfectScore) {
         state.badges.perfectScore = true; playSound('achievement');
         if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos();
-        setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Insignia: Puntaje Perfecto!', {icon:'💯',bg:'linear-gradient(135deg,#FFD700,#FFA500)',duration:3500}); }, 300);
+        setTimeout(() => { mostrarToast('¡Insignia: Puntaje Perfecto!', '💯', 'linear-gradient(135deg,#FFD700,#FFA500)'); }, 300);
         saveBadges();
     }
     if (!state.powerupsUsedThisLevel && !state.badges.noPowerups) {
         state.badges.noPowerups = true; playSound('achievement');
         if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos();
-        setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Insignia: Poder Natural!', {icon:'💪',bg:'linear-gradient(135deg,#8B5CF6,#6D28D9)',duration:3500}); }, 300);
+        setTimeout(() => { mostrarToast('¡Insignia: Poder Natural!', '💪', 'linear-gradient(135deg,#8B5CF6,#6D28D9)'); }, 300);
         saveBadges();
     }
     if (state.currentLevel < 4) {
@@ -1749,10 +1886,6 @@ function showFinalResults() {
         else sp.textContent = '¡El aprendizaje es un camino diario! 💡📖';
     }
     if (state.currentLote) marcarLoteComoUsado(state.currentLote);
-
-    if (state.modoJuego !== 'completo') {
-        guardarPuntaje(levelNames[state.currentLevel], state.levelScore, state.maxStreak);
-    }
 
     showScreen('screen-results');
     if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos();
@@ -1855,15 +1988,16 @@ function updatePowerupButtons() {
 // ==================== INSIGNIAS ====================
 
 function checkBadges() {
-    if (state.score >= 3000 && !state.badges.paesPro) { state.badges.paesPro = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡PAES Pro!', {icon:'🏆',bg:'linear-gradient(135deg,#F59E0B,#D97706)',duration:3500}); },300); saveBadges(); }
-    if (state.streak >= 5 && !state.badges.streaker) { state.badges.streaker = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Rachador!', {icon:'🔥',bg:'linear-gradient(135deg,#EF4444,#DC2626)',duration:3500}); },300); saveBadges(); }
-    if (state.mode === 'timed' && (Date.now()-state.questionStartTime) < 3000 && !state.badges.speedDemon) { state.badges.speedDemon = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { if (window.effectsManager) window.effectsManager.triggerToastAcademico('¡Velocista!', {icon:'⚡',bg:'linear-gradient(135deg,#3B82F6,#1D4ED8)',duration:3500}); },300); saveBadges(); }
+    if (state.score >= 3000 && !state.badges.paesPro) { state.badges.paesPro = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { mostrarToast('¡PAES Pro!', '🏆', 'linear-gradient(135deg,#F59E0B,#D97706)'); }, 300); saveBadges(); }
+    if (state.streak >= 5 && !state.badges.streaker) { state.badges.streaker = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { mostrarToast('¡Rachador!', '🔥', 'linear-gradient(135deg,#EF4444,#DC2626)'); }, 300); saveBadges(); }
+    if (state.mode === 'timed' && (Date.now()-state.questionStartTime) < 3000 && !state.badges.speedDemon) { state.badges.speedDemon = true; playSound('achievement'); if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos(); setTimeout(() => { mostrarToast('¡Velocista!', '⚡', 'linear-gradient(135deg,#3B82F6,#1D4ED8)'); }, 300); saveBadges(); }
 }
 function getBadgeIcon(b) { const i = { perfectScore:'💯', speedDemon:'⚡', streaker:'🔥', paesPro:'🏆', noPowerups:'💪' }; return i[b]||'🏅'; }
 function getBadgeName(b) { const n = { perfectScore:'Puntaje Perfecto', speedDemon:'Velocista', streaker:'Rachador', paesPro:'PAES Pro', noPowerups:'Poder Natural' }; return n[b]||b; }
 function loadBadges() {
     const saved = safeLocalGet('paes_badges_v4', null);
     if (saved) { try { state.badges = { ...state.badges, ...JSON.parse(saved) }; } catch(e) {} }
+    updateSabiondoEvolution();
     const g = document.getElementById('badges-grid'); if (!g) return;
     g.innerHTML = '';
     for (const [b,u] of Object.entries(state.badges)) {
@@ -1872,9 +2006,113 @@ function loadBadges() {
         g.appendChild(e);
     }
 }
-function saveBadges() { safeLocalSet('paes_badges_v4', JSON.stringify(state.badges)); }
+function saveBadges() { safeLocalSet('paes_badges_v4', JSON.stringify(state.badges)); checkSabiondoEvolution(); }
 
-// ==================== LEADERBOARD Y ENVÍO AUTOMÁTICO ====================
+// ==================== EVOLUCIÓN DE SABIONDO ====================
+
+const SABIONDO_RANKS = [
+    { id: 0, min: 0, name: 'Aprendiz',    icon: '🦉', cssClass: '' },
+    { id: 1, min: 1, name: 'Estudioso',   icon: '🤓', cssClass: 'sabiondo-rank-1' },
+    { id: 2, min: 3, name: 'Sabio',       icon: '🎓', cssClass: 'sabiondo-rank-2' },
+    { id: 3, min: 5, name: 'Catedrático', icon: '👑', cssClass: 'sabiondo-rank-3' }
+];
+const SABIONDO_RANK_KEY = 'paes_sabiondo_rank_v1';
+
+function getSabiondoRank() {
+    const totalInsignias = Object.values(state.badges).filter(Boolean).length;
+    let rank = SABIONDO_RANKS[0];
+    for (const r of SABIONDO_RANKS) { if (totalInsignias >= r.min) rank = r; }
+    return rank;
+}
+
+function updateSabiondoEvolution() {
+    const rank = getSabiondoRank();
+    document.querySelectorAll('.buho-svg-container').forEach(container => {
+        SABIONDO_RANKS.forEach(r => { if (r.cssClass) container.classList.remove(r.cssClass); });
+        if (rank.cssClass) container.classList.add(rank.cssClass);
+
+        let badgeEl = container.querySelector('.sabiondo-rank-badge');
+        if (!badgeEl) {
+            badgeEl = document.createElement('span');
+            badgeEl.className = 'sabiondo-rank-badge';
+            container.appendChild(badgeEl);
+        }
+        badgeEl.textContent = rank.icon;
+        badgeEl.title = `Sabiondo · ${rank.name}`;
+        badgeEl.setAttribute('aria-label', `Rango de Sabiondo: ${rank.name}`);
+    });
+}
+
+function checkSabiondoEvolution() {
+    const prevId = parseInt(safeLocalGet(SABIONDO_RANK_KEY, '0'), 10) || 0;
+    const rank = getSabiondoRank();
+    updateSabiondoEvolution();
+    if (rank.id > prevId) {
+        safeLocalSet(SABIONDO_RANK_KEY, String(rank.id));
+        playSound('achievement');
+        if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos();
+        setTimeout(() => {
+            mostrarToast(`¡Sabiondo evolucionó a ${rank.name}! ${rank.icon}`, '✨', 'linear-gradient(135deg,#8B5CF6,#6D28D9)');
+        }, 350);
+    }
+}
+
+// ==================== LEADERBOARD Y ENVÍO ====================
+
+function renderLeaderboard(lista) {
+    const tbody = document.getElementById('leaderboard-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    lista.slice(0, 20).forEach((entry, index) => {
+        const rank = index + 1;
+        const badgeCount = typeof entry.badges === 'number' ? entry.badges : 0;
+        const row = document.createElement('tr');
+        row.innerHTML = `<td class="${rank <= 3 ? 'rank-' + rank : ''}">${rank}</td>
+                         <td>${entry.name || entry.nombre || 'Anónimo'}</td>
+                         <td>${entry.score ?? entry.puntaje_maximo ?? entry.puntaje ?? 0} pts</td>
+                         <td>${'🏅'.repeat(Math.min(badgeCount, 10))}</td>`;
+        tbody.appendChild(row);
+    });
+}
+
+async function fetchRemoteLeaderboard() {
+    try {
+        const url = `${SCRIPT_URL_REGISTRO}?action=get_leaderboard`;
+        const response = await fetch(url, { method: 'GET', mode: 'cors' });
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        const data = await response.json();
+        if (Array.isArray(data)) return data;
+        if (data && Array.isArray(data.leaderboard)) return data.leaderboard;
+        return [];
+    } catch (error) {
+        console.warn('No se pudo cargar el leaderboard remoto:', error);
+        return [];
+    }
+}
+
+async function loadLeaderboard() {
+    let lb = [];
+    try { lb = JSON.parse(safeLocalGet('paes_leaderboard_v4', '[]')); } catch(e) { lb = []; }
+    renderLeaderboard(lb);
+
+    const remoto = await fetchRemoteLeaderboard();
+    if (remoto && remoto.length > 0) {
+        const remotoNormalizado = remoto.map(entry => ({
+            name: entry.nombre || entry.name || 'Anónimo',
+            score: Number(entry.puntaje_maximo || entry.score || 0),
+            badges: Number(entry.insignias || entry.badges || 0)
+        }));
+        const combinado = [...remotoNormalizado, ...lb].sort((a, b) => b.score - a.score);
+        const visto = new Set();
+        const unicos = [];
+        for (const item of combinado) {
+            const key = `${item.name}-${item.score}`;
+            if (!visto.has(key)) { visto.add(key); unicos.push(item); }
+        }
+        renderLeaderboard(unicos.slice(0, 20));
+        safeLocalSet('paes_leaderboard_v4', JSON.stringify(unicos.slice(0, 20)));
+    }
+}
 
 function guardarResultadoEnLeaderboard(nombre) {
     try {
@@ -1891,7 +2129,7 @@ function guardarResultadoEnLeaderboard(nombre) {
         });
         lb.sort((a, b) => b.score - a.score);
         safeLocalSet('paes_leaderboard_v4', JSON.stringify(lb.slice(0, 20)));
-        loadLeaderboard();
+        renderLeaderboard(lb.slice(0, 20));
     } catch (e) {
         console.warn('No se pudo guardar en leaderboard:', e);
     }
@@ -1901,13 +2139,11 @@ function saveToLeaderboard() {
     const nombreRegistrado = safeLocalGet('usuario_nombre', '') || safeLocalGet('paes_jugador_nombre', '');
 
     if (nombreRegistrado) {
-        // Envío automático con el nombre registrado
         guardarResultadoEnLeaderboard(nombreRegistrado);
         enviarResultadosGoogleSheets(nombreRegistrado);
         return;
     }
 
-    // Solo pedir nombre si no hay registro previo (caso raro)
     showNamePromptModal((name) => {
         const nombreFinal = name || 'Anónimo';
         if (name) {
@@ -1939,77 +2175,58 @@ function showNamePromptModal(cb) {
     document.addEventListener('keydown', function esc(e) { if (e.key==='Escape') { close(null); document.removeEventListener('keydown',esc); } });
 }
 
-function loadLeaderboard() {
-    let lb = [];
-    try { lb = JSON.parse(safeLocalGet('paes_leaderboard_v4','[]')); } catch(e) {}
-    const tbody = document.getElementById('leaderboard-body'); if (!tbody) return;
-    tbody.innerHTML = '';
-    lb.forEach((e,i) => {
-        const r = document.createElement('tr');
-        r.innerHTML = `<td class="${i<3?'rank-'+(i+1):''}">${i+1}</td><td>${e.name}</td><td>${e.score} pts</td><td>${'🏅'.repeat(e.badges)}</td>`;
-        tbody.appendChild(r);
-    });
-}
-
 function shareResults() {
     const prom = state.totalPreguntasRespondidas>0?(state.tiempoTotalDesafio/state.totalPreguntasRespondidas).toFixed(1):'---';
     const text = `🎓 ¡${state.score} puntos en PAES Challenge! ⏱️ ${prom}s/pregunta. ¿Puedes superarme? 🦉`;
     if (navigator.share) navigator.share({title:'PAES Challenge',text,url:window.location.href}).catch(()=>{});
-    else navigator.clipboard.writeText(text).then(()=>{ if(window.effectsManager) window.effectsManager.triggerToastAcademico('¡Copiado!',{icon:'📋',duration:2500}); }).catch(()=>{ if(window.effectsManager) window.effectsManager.triggerToastAcademico('No se pudo copiar',{icon:'⚠️',duration:2500}); });
+    else navigator.clipboard.writeText(text).then(()=>{ mostrarToast('¡Copiado!', '📋'); }).catch(()=>{ mostrarToast('No se pudo copiar', '⚠️'); });
 }
 
 // ==================== ENVÍO A GOOGLE SHEETS ====================
 
-const GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbxvTEZlpd12ZLp0Z6krQw4iFsx6mcbBsTVucJxO4W-e-HR_VSKwUTusAi4U6VTgQx7X/exec';
-const SHEETS_PENDING_KEY = 'paes_sheets_pending_v1';
-
-function construirPayloadResultados(nombreJugador) {
-    const minutos = Math.floor(state.tiempoTotalDesafio / 60);
-    const segundos = Math.floor(state.tiempoTotalDesafio % 60);
-    const promedio = state.totalPreguntasRespondidas > 0
-        ? (state.tiempoTotalDesafio / state.totalPreguntasRespondidas).toFixed(1)
-        : 0;
-    const totalCorrectas = state.correctTotal || 0;
-    const totalIncorrectas = state.incorrectTotal || 0;
+function construirPayloadLideres(nombreJugador) {
     return {
-        jugador: nombreJugador || 'Anónimo',
-        partida: state.currentLote || 1,
-        puntaje: state.score,
-        promedio: parseFloat(promedio),
-        correctas: totalCorrectas,
-        total: totalCorrectas + totalIncorrectas,
-        insignias: Object.values(state.badges).filter(Boolean).length,
-        tiempoTotal: `${minutos}m ${segundos}s`,
-        fecha: new Date().toISOString()
+        action: "save_score",
+        nombre: nombreJugador || 'Anónimo',
+        materia: state.modoJuego !== 'completo' ? levelNames[state.currentLevel] : 'General',
+        puntaje_maximo: state.score || 0,
+        racha_maxima: state.maxStreak || 0,
+        fecha: new Date().toISOString().split('T')[0]
     };
 }
 
 function enviarResultadosGoogleSheets(nombreJugador) {
-    const payload = construirPayloadResultados(nombreJugador);
+    const payload = construirPayloadLideres(nombreJugador);
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         encolarEnvioPendiente(payload);
+        mostrarToast('Sin conexión, se guardará localmente', '⚠️');
         return;
     }
-    intentarEnviarGoogleSheets(payload).catch(() => {
-        encolarEnvioPendiente(payload);
-    });
+    intentarEnviarGoogleSheets(payload)
+        .then(() => {
+            mostrarToast('📊 Puntaje enviado correctamente', '✅', 'linear-gradient(135deg,#10B981,#059669)');
+        })
+        .catch(() => {
+            encolarEnvioPendiente(payload);
+            mostrarToast('Sin conexión, se guardará localmente', '⚠️');
+        });
 }
 
 function intentarEnviarGoogleSheets(payload) {
-    return fetch(GOOGLE_SHEETS_URL, {
+    return fetch(SCRIPT_URL_REGISTRO, {
         method: 'POST',
         mode: 'no-cors',
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(payload)
     }).then(() => {
-        console.log('📊 Resultados enviados a Google Sheets:', payload.jugador);
+        console.log('📊 Puntaje enviado a BD_Lideres:', payload.nombre);
     });
 }
 
 function encolarEnvioPendiente(payload) {
     let pendientes = [];
     try { pendientes = JSON.parse(safeLocalGet(SHEETS_PENDING_KEY, '[]')); } catch (e) { pendientes = []; }
-    pendientes.push(payload);
+    pendientes.push({ ...payload, timestamp: Date.now() });
     safeLocalSet(SHEETS_PENDING_KEY, JSON.stringify(pendientes.slice(-20)));
     console.warn('⚠️ Sin conexión: resultado guardado para reintentar más tarde.');
 }
@@ -2030,6 +2247,7 @@ function flushPendingGoogleSheets() {
         safeLocalSet(SHEETS_PENDING_KEY, JSON.stringify(restantes));
         if (restantes.length === 0 && pendientes.length > 0) {
             console.log(`📊 ${pendientes.length} resultado(s) pendiente(s) enviados a Google Sheets.`);
+            mostrarToast('📊 Puntaje pendiente enviado', '✅');
         }
     });
 }

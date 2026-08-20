@@ -1,15 +1,13 @@
+
 /**
  * PAES Challenge Engine v4.4.0 — Producción
  * Lógica del juego + 4 Lotes + Sabiondo + 4 Niveles
  * Registro por apodo y PIN
  * Selector de modalidad: 4 materias individuales o modo completo
  * Reproducción de intro al registrarse
- * Estimación DEMRE con percentiles simulados (distribución normal inversa)
- * Envío automático de puntaje a BD_Lideres (Google Sheets)
- * Carga remota de la tabla de líderes con caché local
- * Soporte táctil para drag & drop
- * Mejoras de accesibilidad y rendimiento
- * Transiciones de pantalla v4.5 y Evolución de Sabiondo
+ * Estimación DEMRE con percentiles simulados
+ * Envío automático a BD_Lideres + carga global de líderes
+ * Soporte táctil, accesibilidad, transiciones y evolución de Sabiondo
  */
 
 const state = {
@@ -93,6 +91,10 @@ const questionsPerLevel = {
 
 const LOTES_STORAGE_KEY = 'paes_lotes_v4';
 const LOTES_VERSION = '4.4.0';
+
+const SCRIPT_URL_REGISTRO = "https://script.google.com/macros/s/AKfycbwZkLrIZ-bo4nJfJQ3r5lTa8orrmYWNVr6joi0Ng-c8SwDyU_bqzc4zxffcB1Phn7-ncA/exec";
+const GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbxvTEZlpd12ZLp0Z6krQw4iFsx6mcbBsTVucJxO4W-e-HR_VSKwUTusAi4U6VTgQx7X/exec';
+const SHEETS_PENDING_KEY = 'paes_sheets_pending_v1';
 
 // ==================== FUNCIONES AUXILIARES ====================
 
@@ -418,10 +420,6 @@ const NicknameModal = {
     }
 };
 
-const SCRIPT_URL_REGISTRO = "https://script.google.com/macros/s/AKfycbwZkLrIZ-bo4nJfJQ3r5lTa8orrmYWNVr6joi0Ng-c8SwDyU_bqzc4zxffcB1Phn7-ncA/exec";
-const GOOGLE_SHEETS_URL = 'https://script.google.com/macros/s/AKfycbxvTEZlpd12ZLp0Z6krQw4iFsx6mcbBsTVucJxO4W-e-HR_VSKwUTusAi4U6VTgQx7X/exec';
-const SHEETS_PENDING_KEY = 'paes_sheets_pending_v1';
-
 async function registrarOAutenticarUsuario(nombre, pin) {
     try {
         await fetch(SCRIPT_URL_REGISTRO, {
@@ -554,7 +552,7 @@ function calcularPuntajeDemreEstimado(correctas, total, promedioTiempo) {
     return { min, max, nivel, desc };
 }
 
-// ==================== INICIALIZACIÓN Y EVENTOS ====================
+// ==================== INICIALIZACIÓN ====================
 
 document.addEventListener('DOMContentLoaded', () => {
     NicknameModal.init();
@@ -575,8 +573,6 @@ window.addEventListener('online', () => {
     loadLeaderboard();
 });
 
-// ==================== LIMPIEZA DE DATOS ANTIGUOS ====================
-
 function limpiarDatosAntiguos() {
     const treintaDias = 30 * 24 * 60 * 60 * 1000;
     const ahora = Date.now();
@@ -593,7 +589,7 @@ function limpiarDatosAntiguos() {
     safeLocalSet(SHEETS_PENDING_KEY, JSON.stringify(nuevaQueue));
 }
 
-// ==================== INSTALACIÓN PWA ====================
+// ==================== PWA ====================
 
 const INSTALL_DISMISSED_KEY_PREFIX = 'paes_install_dismissed_';
 let _deferredInstallPrompt = null;
@@ -801,7 +797,7 @@ function reiniciarLotes() {
     mostrarToast('¡4 nuevas partidas! 🦉', '🔄');
 }
 
-// ==================== GESTIÓN DE LA INTERFAZ Y JUEGO ====================
+// ==================== INTERFAZ Y JUEGO ====================
 
 function createSpeedBonusToast() {
     if (document.getElementById('speed-bonus-toast')) return;
@@ -1135,17 +1131,30 @@ function confirmarSalir() {
 }
 
 function startLevel(lv) {
-    if (!state.loteData?.preguntas) return;
+    if (!state.loteData?.preguntas) {
+        mostrarToast('⚠️ No hay preguntas disponibles para este lote.', '⚠️');
+        restartGame();
+        return;
+    }
+
+    const raw = getPreguntasNivel(lv);
+    const cloned = deepCloneQuestions(raw);
+    state.questions = lv === 1 ? cloned : shuffleArray(cloned);
+    state.totalQuestions = state.questions.length;
+
+    if (state.totalQuestions === 0) {
+        mostrarToast('⚠️ No hay preguntas para la materia seleccionada.', '⚠️');
+        restartGame();
+        return;
+    }
+
     state.currentLevel = lv; state.currentQuestion = 0; state.streak = 0;
     state.levelScore = 0; state.isFrozen = false; state.powerupsUsedThisLevel = false;
     state.levelPerfect = true; state.bonusQuestionActive = false; state.correctInLevel = 0;
     if (state._freezeTimeout) clearTimeout(state._freezeTimeout);
     state._freezeTimeout = null;
     document.body.className = `level-${lv}`;
-    const raw = getPreguntasNivel(lv);
-    const cloned = deepCloneQuestions(raw);
-    state.questions = lv === 1 ? cloned : shuffleArray(cloned);
-    state.totalQuestions = state.questions.length;
+
     state.timer = levelTimerDefaults[lv] || 60;
     updatePowerupButtons(); updateLevelDisplay(); updateScore(); updateStreak(); updateProgress();
     showScreen('screen-question'); updateBuhoReaction('thinking'); playSound('levelstart');
@@ -1885,7 +1894,9 @@ function showFinalResults() {
         else if (state.score >= 3000) sp.textContent = '¡Buen esfuerzo! Sigue practicando. 📚💪';
         else sp.textContent = '¡El aprendizaje es un camino diario! 💡📖';
     }
-    if (state.currentLote) marcarLoteComoUsado(state.currentLote);
+    if (state.currentLote && state.modoJuego === 'completo') {
+        marcarLoteComoUsado(state.currentLote);
+    }
 
     showScreen('screen-results');
     if (window.effectsManager) window.effectsManager.triggerFuegosAcademicos();
